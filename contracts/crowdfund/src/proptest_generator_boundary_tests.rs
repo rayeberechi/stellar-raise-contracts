@@ -3,8 +3,6 @@
 //! Ensures boundary constants and validators behave correctly for frontend UI
 //! display and property-based test stability.
 
-#![cfg(test)]
-
 use proptest::prelude::*;
 use proptest::strategy::Just;
 
@@ -24,6 +22,7 @@ fn valid_goal_strategy() -> impl Strategy<Value = i128> {
     GOAL_MIN..=GOAL_MAX
 }
 
+#[allow(dead_code)]
 fn valid_min_contribution_strategy(goal: i128) -> impl Strategy<Value = i128> {
     MIN_CONTRIBUTION_FLOOR..=goal
 }

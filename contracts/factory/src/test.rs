@@ -7,7 +7,7 @@ extern crate std;
 #[allow(clippy::too_many_arguments)]
 mod crowdfund_wasm {
     soroban_sdk::contractimport!(
-        file = "../../target/wasm32-unknown-unknown/release/crowdfund.wasm"
+        file = "../../contracts/factory/wasm/crowdfund.wasm"
     );
 }
 
