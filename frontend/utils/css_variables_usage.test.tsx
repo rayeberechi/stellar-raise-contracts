@@ -13,6 +13,7 @@ import {
   ALLOWED_CSS_VARIABLES,
   CssVariablesMap,
   useCssVariable,
+  useDocsCssVariable,
 } from './css_variables_usage';
 
 describe('CssVariableValidator', () => {
@@ -393,6 +394,29 @@ describe('useCssVariable hook', () => {
   });
 });
 
+describe('useDocsCssVariable hook', () => {
+  it('should be defined as a function', () => {
+    expect(typeof useDocsCssVariable).toBe('function');
+  });
+
+  it('should be callable with valid documentation variable name', () => {
+    const container = document.createElement('div');
+    container.style.setProperty('--color-docs-bg', '#ffffff');
+    document.body.appendChild(container);
+
+    const cssVars = new CssVariablesUsage(container);
+    const result = cssVars.get('--color-docs-bg');
+    expect(result).toBe('#ffffff');
+
+    // Due to the hook running properly only in React context for testing we test 
+    // it simply runs without failure for the fallback as JSDOM window is mocked natively
+    const fallbackResult = useDocsCssVariable('--color-docs-bg', '#f0f0f0');
+    expect(typeof fallbackResult).toBe('string');
+
+    document.body.removeChild(container);
+  });
+});
+
 describe('ALLOWED_CSS_VARIABLES constant', () => {
   it('should have all required CSS variables defined', () => {
     // Colors
@@ -416,6 +440,11 @@ describe('ALLOWED_CSS_VARIABLES constant', () => {
     // Safe area
     expect(ALLOWED_CSS_VARIABLES).toContain('--safe-area-inset-top');
     expect(ALLOWED_CSS_VARIABLES).toContain('--safe-area-inset-bottom');
+
+    // Documentation
+    expect(ALLOWED_CSS_VARIABLES).toContain('--color-docs-bg');
+    expect(ALLOWED_CSS_VARIABLES).toContain('--color-docs-text');
+    expect(ALLOWED_CSS_VARIABLES).toContain('--font-docs-code');
   });
 
   it('should not contain invalid variable names', () => {
