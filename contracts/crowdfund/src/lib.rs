@@ -19,6 +19,7 @@ mod withdraw_event_emission_test;
 
 pub mod contract_state_size;
 #[cfg(test)]
+#[path = "contract_state_size.test.rs"]
 mod contract_state_size_test;
 
 

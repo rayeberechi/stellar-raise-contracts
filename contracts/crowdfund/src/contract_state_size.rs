@@ -3,9 +3,7 @@ use soroban_sdk::{Env, String};
 
 #![allow(missing_docs)]
 
-use soroban_sdk::{contracterror, Env, String, Vec};
-
-use crate::DataKey;
+use soroban_sdk::{contracterror, String, Vec};
 
 // ── Limits ───────────────────────────────────────────────────────────────────
 
@@ -58,24 +56,19 @@ pub const MAX_SOCIAL_LINKS_LENGTH: u32 = 300;
 /// Maximum total byte length of all metadata fields combined.
 pub const MAX_METADATA_TOTAL_LENGTH: u32 = 4000;
 
-// ── Error ─────────────────────────────────────────────────────────────────────
+// ── Validation helpers ────────────────────────────────────────────────────────
 
-/// Returned when a state-size limit would be exceeded.
+/// Validates that a title does not exceed MAX_TITLE_LENGTH bytes.
 ///
-/// @notice Callers should treat this as a permanent rejection for the current
-///         campaign state; the limit will not change without a contract upgrade.
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
-pub enum StateSizeError {
-    /// The contributors / pledgers list is full.
-    ContributorLimitExceeded = 100,
-    /// The roadmap list is full.
-    RoadmapLimitExceeded = 101,
-    /// The stretch-goals list is full.
-    StretchGoalLimitExceeded = 102,
-    /// A string field exceeds `MAX_STRING_LEN` bytes.
-    StringTooLong = 103,
+/// @param title The title string to validate.
+/// @return Ok(()) if the title is within limits, Err with descriptive message otherwise.
+/// @notice Callers should treat errors as permanent rejections; the limit
+///         will not change without a contract upgrade.
+pub fn validate_title(title: &String) -> Result<(), &'static str> {
+    if title.len() > MAX_TITLE_LENGTH {
+        return Err("title exceeds MAX_TITLE_LENGTH bytes");
+    }
+    Ok(())
 }
 
 impl core::fmt::Display for StateSizeError {
@@ -188,7 +181,8 @@ pub fn validate_stretch_goal_capacity(len: u32) -> Result<(), &'static str> {
 /// Assert that `s` does not exceed [`MAX_STRING_LEN`] bytes.
 ///
 /// @param s The string to validate.
-/// @return `Ok(())` when within limits, `Err(StateSizeError::StringTooLong)` otherwise.
+/// @return Ok(()) if within limits, Err with StateSizeError otherwise.
+/// @deprecated Use validate_title, validate_description, or validate_social_links instead.
 pub fn check_string_len(s: &String) -> Result<(), StateSizeError> {
     if s.len() > MAX_STRING_LEN {
         return Err(StateSizeError::StringTooLong);
@@ -196,13 +190,11 @@ pub fn check_string_len(s: &String) -> Result<(), StateSizeError> {
     Ok(())
 }
 
-/// Assert that adding one more entry to the `Contributors` list is allowed.
-///
-/// Reads the current list length from persistent storage and compares it
-/// against [`MAX_CONTRIBUTORS`].
+/// Legacy function for checking contributor limit.
 ///
 /// @param env Soroban environment reference.
-/// @return `Ok(())` when within limits, `Err(StateSizeError::ContributorLimitExceeded)` otherwise.
+/// @return Ok(()) if within limits, Err with StateSizeError otherwise.
+/// @deprecated Use validate_contributor_capacity instead.
 pub fn check_contributor_limit(env: &Env) -> Result<(), StateSizeError> {
     let contributors: Vec<soroban_sdk::Address> = env
         .storage()
@@ -216,10 +208,11 @@ pub fn check_contributor_limit(env: &Env) -> Result<(), StateSizeError> {
     Ok(())
 }
 
-/// Assert that adding one more entry to the `Pledgers` list is allowed.
+/// Legacy function for checking pledger limit.
 ///
 /// @param env Soroban environment reference.
-/// @return `Ok(())` when within limits, `Err(StateSizeError::ContributorLimitExceeded)` otherwise.
+/// @return Ok(()) if within limits, Err with StateSizeError otherwise.
+/// @deprecated Use validate_pledger_capacity instead.
 pub fn check_pledger_limit(env: &Env) -> Result<(), StateSizeError> {
     let pledgers: Vec<soroban_sdk::Address> = env
         .storage()
@@ -233,10 +226,11 @@ pub fn check_pledger_limit(env: &Env) -> Result<(), StateSizeError> {
     Ok(())
 }
 
-/// Assert that adding one more item to the `Roadmap` list is allowed.
+/// Legacy function for checking roadmap limit.
 ///
 /// @param env Soroban environment reference.
-/// @return `Ok(())` when within limits, `Err(StateSizeError::RoadmapLimitExceeded)` otherwise.
+/// @return Ok(()) if within limits, Err with StateSizeError otherwise.
+/// @deprecated Use validate_roadmap_capacity instead.
 pub fn check_roadmap_limit(env: &Env) -> Result<(), StateSizeError> {
     let roadmap: Vec<crate::RoadmapItem> = env
         .storage()
@@ -250,10 +244,11 @@ pub fn check_roadmap_limit(env: &Env) -> Result<(), StateSizeError> {
     Ok(())
 }
 
-/// Assert that adding one more stretch goal is allowed.
+/// Legacy function for checking stretch goal limit.
 ///
 /// @param env Soroban environment reference.
-/// @return `Ok(())` when within limits, `Err(StateSizeError::StretchGoalLimitExceeded)` otherwise.
+/// @return Ok(()) if within limits, Err with StateSizeError otherwise.
+/// @deprecated Use validate_stretch_goal_capacity instead.
 pub fn check_stretch_goal_limit(env: &Env) -> Result<(), StateSizeError> {
     let goals: Vec<i128> = env
         .storage()
