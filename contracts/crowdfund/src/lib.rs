@@ -23,6 +23,12 @@ mod contract_state_size_test;
 
 
 pub mod refund_single_token;
+pub mod soroban_sdk_minor;
+pub mod campaign_goal_minimum;
+pub mod contribute_error_handling;
+pub mod proptest_generator_boundary;
+
+// --- Imports from Modules ---
 use refund_single_token::{
     execute_refund_single, refund_single_transfer, validate_refund_preconditions,
 };
@@ -36,9 +42,11 @@ mod soroban_sdk_minor_test;
 #[path = "stellar_token_minter_test.rs"]
 mod stellar_token_minter_test;
 
+// --- Tests ---
+#[cfg(test)]
+mod test;
 #[cfg(test)]
 mod auth_tests;
-pub mod campaign_goal_minimum;
 #[cfg(test)]
 mod campaign_goal_minimum_test;
 pub mod crowdfund_initialize_function;
@@ -48,7 +56,6 @@ mod crowdfund_initialize_function_test;
 pub mod contribute_error_handling;
 #[cfg(test)]
 mod contribute_error_handling_tests;
-pub mod proptest_generator_boundary;
 #[cfg(test)]
 
 mod crowdfund_initialize_function_test;
@@ -63,17 +70,14 @@ pub mod stellar_token_minter;
 #[cfg(test)]
 mod stellar_token_minter_test;
 #[cfg(test)]
-mod refund_single_token_tests;
-#[cfg(test)]
-mod test;
+#[path = "admin_upgrade_mechanism.test.rs"]
+mod admin_upgrade_mechanism_test;
 
+// --- Constants ---
 const CONTRACT_VERSION: u32 = 3;
 #[allow(dead_code)]
-const CONTRIBUTION_COOLDOWN: u64 = 60; // 60 seconds cooldown
+const CONTRIBUTION_COOLDOWN: u64 = 60;
 
-/// Maximum number of NFT mint calls (and their events) emitted in a single
-/// `withdraw()` invocation.  Caps per-contributor event emission to prevent
-/// unbounded gas consumption when the contributor list is large.
 pub const MAX_NFT_MINT_BATCH: u32 = 50;
 
 // ── Data Types ──────────────────────────────────────────────────────────────
@@ -125,7 +129,6 @@ pub struct CampaignStats {
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
-    /// The address of the campaign creator.
     Creator,
     /// The token contract address used for contributions.
     Token,
@@ -143,33 +146,24 @@ pub enum DataKey {
     Status,
     /// Minimum contribution amount.
     MinContribution,
-    /// Individual pledge by address (for conditional pledges).
     Pledge(Address),
     /// Total amount pledged but not yet collected.
     TotalPledged,
-    /// Stretch goals for bonus milestones.
     StretchGoals,
-    /// Optional secondary bonus goal threshold.
     BonusGoal,
-    /// Optional description for the secondary bonus goal.
     BonusGoalDescription,
-    /// Tracks if bonus-goal-reached event has already been emitted.
     BonusGoalReachedEmitted,
-    /// List of all pledgers (for conditional pledges).
     Pledgers,
-    /// List of roadmap items with dates and descriptions.
     Roadmap,
     /// The designated admin address (set to creator at initialization).
     Admin,
     /// Campaign title.
     Title,
-    /// Campaign description.
     Description,
     /// Campaign social links.
     SocialLinks,
     /// Platform fee configuration.
     PlatformConfig,
-    /// Optional NFT contract used for contributor reward minting.
     NFTContract,
 }
 
@@ -194,7 +188,6 @@ pub enum ContractError {
     GoalReached = 5,
     /// An arithmetic overflow occurred.
     Overflow = 6,
-    /// Returned by `refund_single` when the caller has no contribution to refund.
     NothingToRefund = 7,
 
     /// Returned by `initialize` when `goal < MIN_GOAL_AMOUNT`.
@@ -210,9 +203,7 @@ pub enum ContractError {
 
     /// Returned by `contribute` when `amount` is zero.
     ZeroAmount = 8,
-    /// Returned by `contribute` when `amount` is below `min_contribution`.
     BelowMinimum = 9,
-    /// Returned by `contribute` when the campaign is not active.
     CampaignNotActive = 10,
 
 }
@@ -922,10 +913,13 @@ impl CrowdfundContract {
     /// # Panics
     /// * If the caller is not the admin.
     pub fn upgrade(env: Env, new_wasm_hash: soroban_sdk::BytesN<32>) {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        admin.require_auth();
+        let admin = admin_upgrade_mechanism::validate_admin_upgrade(&env);
+        admin_upgrade_mechanism::perform_upgrade(&env, new_wasm_hash.clone());
 
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "upgrade"), admin),
+            new_wasm_hash
+        );
     }
 
     /// Update campaign metadata — only callable by the creator while the

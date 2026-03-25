@@ -1,34 +1,5 @@
-//! # Contract State Size Limits
-//!
-//! This module enforces upper-bound limits on the size of unbounded collections
-//! stored in contract state to prevent:
-//!
-//! - **DoS via state bloat**: an attacker flooding the contributors or roadmap
-//!   lists until operations become too expensive to execute.
-//! - **Gas exhaustion**: iteration over an unbounded `Vec` in `withdraw`,
-//!   `refund`, or `collect_pledges` can exceed Soroban resource limits.
-//! - **Ledger entry size violations**: Soroban enforces a hard cap on the
-//!   serialised size of each ledger entry; exceeding it causes a host panic.
-//!
-//! ## Security Assumptions
-//!
-//! 1. `MAX_CONTRIBUTORS` caps the `Contributors` and `Pledgers` persistent
-//!    lists.  Any `contribute` or `pledge` call that would push the list past
-//!    this limit is rejected with [`ContractError::StateSizeLimitExceeded`].
-//! 2. `MAX_ROADMAP_ITEMS` caps the `Roadmap` instance list.
-//! 3. `MAX_STRING_LEN` caps every user-supplied `String` field (title,
-//!    description, social links, roadmap description) to prevent oversized
-//!    ledger entries.
-//! 4. `MAX_STRETCH_GOALS` caps the `StretchGoals` list.
-//!
-//! ## Limits (rationale)
-//!
-//! | Constant              | Value | Rationale                                      |
-//! |-----------------------|-------|------------------------------------------------|
-//! | `MAX_CONTRIBUTORS`    | 1 000 | Keeps `withdraw` / `refund` batch within gas   |
-//! | `MAX_ROADMAP_ITEMS`   |    20 | Cosmetic list; no operational iteration needed |
-//! | `MAX_STRETCH_GOALS`   |    10 | Small advisory list                            |
-//! | `MAX_STRING_LEN`      |   256 | Prevents oversized instance-storage entries    |
+#![no_std]
+use soroban_sdk::{Env, String};
 
 #![allow(missing_docs)]
 
@@ -64,6 +35,7 @@ pub const MAX_ROADMAP_DESCRIPTION_LENGTH: u32 = 280;
 pub const MAX_METADATA_TOTAL_LENGTH: u32 = 2_304;
 /// Backward-compatible generic string limit used by legacy tests/helpers.
 pub const MAX_STRING_LEN: u32 = 256;
+pub const MAX_CONTRIBUTORS: u32 = 1_000;
 
 // ── Error ─────────────────────────────────────────────────────────────────────
 
