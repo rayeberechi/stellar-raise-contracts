@@ -1,223 +1,155 @@
-//! # contract_state_size
+//! # Contract State Size Limits
 //!
-//! @title   ContractStateSize — Centralized limits for variable-size contract state
-//! @notice  Bounds metadata strings and collection growth so the crowdfund
-//!          contract cannot accumulate unreviewed, unbounded state over time.
-//! @dev     The helpers in this module are pure and return `Result<(), &'static str>`
-//!          so they can be reused from contract logic, tests, and off-chain
-//!          tooling without coupling to `ContractError`.
+//! This module enforces upper-bound limits on the size of unbounded collections
+//! stored in contract state to prevent:
 //!
-//! ## Why these limits exist
+//! - **DoS via state bloat**: an attacker flooding the contributors or roadmap
+//!   lists until operations become too expensive to execute.
+//! - **Gas exhaustion**: iteration over an unbounded `Vec` in `withdraw`,
+//!   `refund`, or `collect_pledges` can exceed Soroban resource limits.
+//! - **Ledger entry size violations**: Soroban enforces a hard cap on the
+//!   serialised size of each ledger entry; exceeding it causes a host panic.
 //!
-//! The crowdfund contract stores several fields whose size is controlled by
-//! user input:
+//! ## Security Assumptions
 //!
-//! 1. Metadata strings (`title`, `description`, `socials`, bonus-goal text)
-//! 2. Contributor and pledger address lists
-//! 3. Roadmap item descriptions
-//! 4. Stretch-goal vectors
+//! 1. `MAX_CONTRIBUTORS` caps the `Contributors` and `Pledgers` persistent
+//!    lists.  Any `contribute` or `pledge` call that would push the list past
+//!    this limit is rejected with [`ContractError::StateSizeLimitExceeded`].
+//! 2. `MAX_ROADMAP_ITEMS` caps the `Roadmap` instance list.
+//! 3. `MAX_STRING_LEN` caps every user-supplied `String` field (title,
+//!    description, social links, roadmap description) to prevent oversized
+//!    ledger entries.
+//! 4. `MAX_STRETCH_GOALS` caps the `StretchGoals` list.
 //!
-//! Without explicit bounds, these values can grow until:
+//! ## Limits (rationale)
 //!
-//! - CI tests become slower and more memory-intensive
-//! - Storage growth becomes harder to reason about during review
-//! - Contract calls that iterate over vectors become less predictable
-//! - Off-chain tooling sees inconsistent or excessively large payloads
-//!
-//! ## Security assumptions
-//!
-//! 1. Fixed maxima make worst-case state growth auditable.
-//! 2. Rejecting oversize writes before persistence prevents silent storage bloat.
-//! 3. Bounding collection counts reduces gas and event-surface risk in flows
-//!    that later read or iterate over those collections.
-//! 4. Metadata limits are sized for practical UX while preventing abuse via
-//!    arbitrarily large strings.
+//! | Constant              | Value | Rationale                                      |
+//! |-----------------------|-------|------------------------------------------------|
+//! | `MAX_CONTRIBUTORS`    | 1 000 | Keeps `withdraw` / `refund` batch within gas   |
+//! | `MAX_ROADMAP_ITEMS`   |    20 | Cosmetic list; no operational iteration needed |
+//! | `MAX_STRETCH_GOALS`   |    10 | Small advisory list                            |
+//! | `MAX_STRING_LEN`      |   256 | Prevents oversized instance-storage entries    |
 
-use soroban_sdk::String;
+#![allow(missing_docs)]
 
-/// Maximum number of contributor addresses stored in the contributor index.
+use soroban_sdk::{contracterror, Env, String, Vec};
+
+use crate::DataKey;
+
+// ── Limits ───────────────────────────────────────────────────────────────────
+
+/// Maximum number of unique contributors (and pledgers) tracked on-chain.
+pub const MAX_CONTRIBUTORS: u32 = 1_000;
+
+/// Maximum number of roadmap items stored in instance storage.
+pub const MAX_ROADMAP_ITEMS: u32 = 20;
+
+/// Maximum number of stretch-goal milestones.
+pub const MAX_STRETCH_GOALS: u32 = 10;
+
+/// Maximum byte length of any user-supplied `String` field.
+pub const MAX_STRING_LEN: u32 = 256;
+
+// ── Error ─────────────────────────────────────────────────────────────────────
+
+/// Returned when a state-size limit would be exceeded.
 ///
-/// @dev Contributions themselves remain stored per-address. This limit bounds
-///      the enumerated contributor list used by view methods and reward flows.
-pub const MAX_CONTRIBUTORS: u32 = 128;
+/// @notice Callers should treat this as a permanent rejection for the current
+///         campaign state; the limit will not change without a contract upgrade.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum StateSizeError {
+    /// The contributors / pledgers list is full.
+    ContributorLimitExceeded = 100,
+    /// The roadmap list is full.
+    RoadmapLimitExceeded = 101,
+    /// The stretch-goals list is full.
+    StretchGoalLimitExceeded = 102,
+    /// A string field exceeds `MAX_STRING_LEN` bytes.
+    StringTooLong = 103,
+}
 
-/// Maximum number of pledger addresses stored in the pledger index.
-pub const MAX_PLEDGERS: u32 = 128;
+// ── Validation helpers ────────────────────────────────────────────────────────
 
-/// Maximum number of roadmap items allowed for a campaign.
-pub const MAX_ROADMAP_ITEMS: u32 = 32;
-
-/// Maximum number of stretch-goal milestones allowed for a campaign.
-pub const MAX_STRETCH_GOALS: u32 = 32;
-
-/// Maximum UTF-8 byte length for the campaign title.
-pub const MAX_TITLE_LENGTH: u32 = 128;
-
-/// Maximum UTF-8 byte length for the campaign description.
-pub const MAX_DESCRIPTION_LENGTH: u32 = 2_048;
-
-/// Maximum UTF-8 byte length for the social-links field.
-pub const MAX_SOCIAL_LINKS_LENGTH: u32 = 512;
-
-/// Maximum UTF-8 byte length for the optional bonus-goal description.
-pub const MAX_BONUS_GOAL_DESCRIPTION_LENGTH: u32 = 280;
-
-/// Maximum UTF-8 byte length for a roadmap item description.
-pub const MAX_ROADMAP_DESCRIPTION_LENGTH: u32 = 280;
-
-/// Maximum combined metadata footprint for title + description + socials.
+/// Assert that `s` does not exceed [`MAX_STRING_LEN`] bytes.
 ///
-/// @dev This budget is intentionally stricter than the sum of the individual
-///      field maxima so callers cannot max out every metadata field at once.
-pub const MAX_METADATA_TOTAL_LENGTH: u32 = 2_304;
-
-#[inline]
-fn validate_string_length(
-    value: &String,
-    max_length: u32,
-    error: &'static str,
-) -> Result<(), &'static str> {
-    if value.len() > max_length {
-        return Err(error);
+/// @param s The string to validate.
+/// @return `Ok(())` when within limits, `Err(StateSizeError::StringTooLong)` otherwise.
+pub fn check_string_len(s: &String) -> Result<(), StateSizeError> {
+    if s.len() > MAX_STRING_LEN {
+        return Err(StateSizeError::StringTooLong);
     }
     Ok(())
 }
 
-#[inline]
-fn validate_next_count(
-    current_count: u32,
-    max_count: u32,
-    error: &'static str,
-) -> Result<(), &'static str> {
-    if current_count >= max_count {
-        return Err(error);
+/// Assert that adding one more entry to the `Contributors` list is allowed.
+///
+/// Reads the current list length from persistent storage and compares it
+/// against [`MAX_CONTRIBUTORS`].
+///
+/// @param env Soroban environment reference.
+/// @return `Ok(())` when within limits, `Err(StateSizeError::ContributorLimitExceeded)` otherwise.
+pub fn check_contributor_limit(env: &Env) -> Result<(), StateSizeError> {
+    let contributors: Vec<soroban_sdk::Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Contributors)
+        .unwrap_or_else(|| Vec::new(env));
+
+    if contributors.len() >= MAX_CONTRIBUTORS {
+        return Err(StateSizeError::ContributorLimitExceeded);
     }
     Ok(())
 }
 
-/// Validates the campaign title length.
+/// Assert that adding one more entry to the `Pledgers` list is allowed.
 ///
-/// @param title Proposed title string.
-/// @return `Ok(())` when `title.len() <= MAX_TITLE_LENGTH`.
-pub fn validate_title(title: &String) -> Result<(), &'static str> {
-    validate_string_length(
-        title,
-        MAX_TITLE_LENGTH,
-        "title exceeds MAX_TITLE_LENGTH bytes",
-    )
-}
+/// @param env Soroban environment reference.
+/// @return `Ok(())` when within limits, `Err(StateSizeError::ContributorLimitExceeded)` otherwise.
+pub fn check_pledger_limit(env: &Env) -> Result<(), StateSizeError> {
+    let pledgers: Vec<soroban_sdk::Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Pledgers)
+        .unwrap_or_else(|| Vec::new(env));
 
-/// Validates the campaign description length.
-///
-/// @param description Proposed description string.
-/// @return `Ok(())` when `description.len() <= MAX_DESCRIPTION_LENGTH`.
-pub fn validate_description(description: &String) -> Result<(), &'static str> {
-    validate_string_length(
-        description,
-        MAX_DESCRIPTION_LENGTH,
-        "description exceeds MAX_DESCRIPTION_LENGTH bytes",
-    )
-}
-
-/// Validates the social-links field length.
-///
-/// @param socials Proposed social-links string.
-/// @return `Ok(())` when `socials.len() <= MAX_SOCIAL_LINKS_LENGTH`.
-pub fn validate_social_links(socials: &String) -> Result<(), &'static str> {
-    validate_string_length(
-        socials,
-        MAX_SOCIAL_LINKS_LENGTH,
-        "social links exceed MAX_SOCIAL_LINKS_LENGTH bytes",
-    )
-}
-
-/// Validates the optional bonus-goal description length.
-///
-/// @param description Proposed bonus-goal description.
-/// @return `Ok(())` when the value fits within the configured bound.
-pub fn validate_bonus_goal_description(description: &String) -> Result<(), &'static str> {
-    validate_string_length(
-        description,
-        MAX_BONUS_GOAL_DESCRIPTION_LENGTH,
-        "bonus goal description exceeds MAX_BONUS_GOAL_DESCRIPTION_LENGTH bytes",
-    )
-}
-
-/// Validates a roadmap item description length.
-///
-/// @param description Proposed roadmap text.
-/// @return `Ok(())` when the roadmap text is within the configured limit.
-pub fn validate_roadmap_description(description: &String) -> Result<(), &'static str> {
-    validate_string_length(
-        description,
-        MAX_ROADMAP_DESCRIPTION_LENGTH,
-        "roadmap description exceeds MAX_ROADMAP_DESCRIPTION_LENGTH bytes",
-    )
-}
-
-/// Validates the combined metadata footprint.
-///
-/// @param title_length Campaign title length in bytes.
-/// @param description_length Campaign description length in bytes.
-/// @param socials_length Social-links field length in bytes.
-/// @return `Ok(())` when the total fits within `MAX_METADATA_TOTAL_LENGTH`.
-pub fn validate_metadata_total_length(
-    title_length: u32,
-    description_length: u32,
-    socials_length: u32,
-) -> Result<(), &'static str> {
-    let total = title_length
-        .checked_add(description_length)
-        .and_then(|value| value.checked_add(socials_length))
-        .unwrap_or(u32::MAX);
-
-    if total > MAX_METADATA_TOTAL_LENGTH {
-        return Err("metadata exceeds MAX_METADATA_TOTAL_LENGTH bytes");
+    if pledgers.len() >= MAX_CONTRIBUTORS {
+        return Err(StateSizeError::ContributorLimitExceeded);
     }
-
     Ok(())
 }
 
-/// Validates that a new contributor can be added to the indexed contributor list.
+/// Assert that adding one more item to the `Roadmap` list is allowed.
 ///
-/// @param current_count Current number of indexed contributors.
-/// @return `Ok(())` when `current_count < MAX_CONTRIBUTORS`.
-pub fn validate_contributor_capacity(current_count: u32) -> Result<(), &'static str> {
-    validate_next_count(
-        current_count,
-        MAX_CONTRIBUTORS,
-        "contributors exceed MAX_CONTRIBUTORS",
-    )
+/// @param env Soroban environment reference.
+/// @return `Ok(())` when within limits, `Err(StateSizeError::RoadmapLimitExceeded)` otherwise.
+pub fn check_roadmap_limit(env: &Env) -> Result<(), StateSizeError> {
+    let roadmap: Vec<crate::RoadmapItem> = env
+        .storage()
+        .instance()
+        .get(&DataKey::Roadmap)
+        .unwrap_or_else(|| Vec::new(env));
+
+    if roadmap.len() >= MAX_ROADMAP_ITEMS {
+        return Err(StateSizeError::RoadmapLimitExceeded);
+    }
+    Ok(())
 }
 
-/// Validates that a new pledger can be added to the indexed pledger list.
+/// Assert that adding one more stretch goal is allowed.
 ///
-/// @param current_count Current number of indexed pledgers.
-/// @return `Ok(())` when `current_count < MAX_PLEDGERS`.
-pub fn validate_pledger_capacity(current_count: u32) -> Result<(), &'static str> {
-    validate_next_count(current_count, MAX_PLEDGERS, "pledgers exceed MAX_PLEDGERS")
-}
+/// @param env Soroban environment reference.
+/// @return `Ok(())` when within limits, `Err(StateSizeError::StretchGoalLimitExceeded)` otherwise.
+pub fn check_stretch_goal_limit(env: &Env) -> Result<(), StateSizeError> {
+    let goals: Vec<i128> = env
+        .storage()
+        .instance()
+        .get(&DataKey::StretchGoals)
+        .unwrap_or_else(|| Vec::new(env));
 
-/// Validates that a new roadmap item can be appended.
-///
-/// @param current_count Current number of roadmap items.
-/// @return `Ok(())` when `current_count < MAX_ROADMAP_ITEMS`.
-pub fn validate_roadmap_capacity(current_count: u32) -> Result<(), &'static str> {
-    validate_next_count(
-        current_count,
-        MAX_ROADMAP_ITEMS,
-        "roadmap exceeds MAX_ROADMAP_ITEMS",
-    )
-}
-
-/// Validates that a new stretch goal can be appended.
-///
-/// @param current_count Current number of stretch goals.
-/// @return `Ok(())` when `current_count < MAX_STRETCH_GOALS`.
-pub fn validate_stretch_goal_capacity(current_count: u32) -> Result<(), &'static str> {
-    validate_next_count(
-        current_count,
-        MAX_STRETCH_GOALS,
-        "stretch goals exceed MAX_STRETCH_GOALS",
-    )
+    if goals.len() >= MAX_STRETCH_GOALS {
+        return Err(StateSizeError::StretchGoalLimitExceeded);
+    }
+    Ok(())
 }
