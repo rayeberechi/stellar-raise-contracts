@@ -4,7 +4,11 @@
 //! `ContractError` variants, enabling scripts and CI/CD pipelines to handle
 //! errors programmatically.
 //!
-//! # Error taxonomy for `contribute()`
+//! @notice  All error conditions that can arise during a contribution are
+//!          represented as typed `ContractError` variants.  This module
+//!          re-exports their numeric codes and provides off-chain helpers so
+//!          scripts can map a raw error code to a human-readable description
+//!          without embedding magic numbers.
 //!
 //! | Code | Variant              | Trigger                                          |
 //! |------|----------------------|--------------------------------------------------|
@@ -65,4 +69,48 @@ pub fn describe_error(code: u32) -> &'static str {
 /// None of the `contribute()` errors are retryable without a state change.
 pub fn is_retryable(_code: u32) -> bool {
     false
+}
+
+/// Emits a structured diagnostic event for a `contribute()` error.
+///
+/// # Event schema
+///
+/// | Field   | Value                                      |
+/// |---------|--------------------------------------------|
+/// | topic 0 | `Symbol("contribute_error")`               |
+/// | topic 1 | `Symbol(<variant_name>)`                   |
+/// | data    | `u32` error code                           |
+///
+/// Scripts and monitoring tools can subscribe to `contribute_error` events to
+/// observe failures without parsing host-level error codes.
+///
+/// # Security
+///
+/// This function only emits read-only diagnostic data. It does not mutate
+/// contract state and cannot be called externally — it is invoked exclusively
+/// from within `contribute()` before the error is returned to the caller.
+pub fn log_contribute_error(env: &soroban_sdk::Env, error: crate::ContractError) {
+    use soroban_sdk::Symbol;
+    let (variant, code) = match error {
+        crate::ContractError::CampaignEnded => (
+            Symbol::new(env, "CampaignEnded"),
+            error_codes::CAMPAIGN_ENDED,
+        ),
+        crate::ContractError::Overflow => {
+            (Symbol::new(env, "Overflow"), error_codes::OVERFLOW)
+        }
+        crate::ContractError::ZeroAmount => {
+            (Symbol::new(env, "ZeroAmount"), error_codes::ZERO_AMOUNT)
+        }
+        crate::ContractError::BelowMinimum => {
+            (Symbol::new(env, "BelowMinimum"), error_codes::BELOW_MINIMUM)
+        }
+        crate::ContractError::CampaignNotActive => (
+            Symbol::new(env, "CampaignNotActive"),
+            error_codes::CAMPAIGN_NOT_ACTIVE,
+        ),
+        _ => return, // non-contribute errors are not logged here
+    };
+    env.events()
+        .publish(("contribute_error", variant), code);
 }

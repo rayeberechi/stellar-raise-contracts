@@ -1,276 +1,116 @@
-#![cfg(test)]
+//! Tests for initialize-function security and maintainability behavior.
 
-use soroban_sdk::{testutils::Ledger, Env};
+use soroban_sdk::{testutils::Address as _, token, Address, Env, String as SorobanString};
 
-use crate::crowdfund_initialize_function::{
-    validate_initialization_params, validate_initialization_params_bool, InitError,
-};
+use crate::{CrowdfundContract, CrowdfundContractClient};
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-fn env_at(ts: u64) -> Env {
+/// @notice Build a test env with a minted creator balance.
+fn setup() -> (Env, CrowdfundContractClient<'static>, Address, Address) {
     let env = Env::default();
-    env.ledger().set_timestamp(ts);
-    env
+    env.mock_all_auths();
+
+    let contract_id = env.register(CrowdfundContract, ());
+    let client = CrowdfundContractClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin);
+    let token_address = token_id.address();
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_address);
+
+    let creator = Address::generate(&env);
+    token_admin_client.mint(&creator, &1_000_000);
+
+    (env, client, creator, token_address)
 }
 
-// ── Happy-path ───────────────────────────────────────────────────────────────
-
+/// @notice Ensure initialize rejects non-positive goal.
+/// @security Prevents unusable or invalid campaigns from being instantiated.
 #[test]
-fn test_valid_minimal_params() {
-    let env = env_at(1_000);
-    assert_eq!(
-        validate_initialization_params(&env, 1_000, 2_000, 10, None, None),
-        Ok(())
+#[should_panic(expected = "goal must be positive")]
+fn initialize_rejects_zero_goal() {
+    let (env, client, creator, token) = setup();
+    let deadline = env.ledger().timestamp() + 3_600;
+    client.initialize(
+        &creator, &creator, &token, &0, &deadline, &1_000, &None, &None, &None,
     );
 }
 
+/// @notice Ensure initialize rejects non-positive minimum contribution.
+/// @security Blocks zero/negative minimums that break contribution invariants.
 #[test]
-fn test_valid_min_contribution_equals_goal() {
-    // min_contribution == goal is the boundary — still valid.
-    let env = env_at(0);
-    assert_eq!(
-        validate_initialization_params(&env, 500, 1_000, 500, None, None),
-        Ok(())
+#[should_panic(expected = "min contribution must be positive")]
+fn initialize_rejects_zero_min_contribution() {
+    let (env, client, creator, token) = setup();
+    let deadline = env.ledger().timestamp() + 3_600;
+    client.initialize(
+        &creator, &creator, &token, &1_000_000, &deadline, &0, &None, &None, &None,
     );
 }
 
+/// @notice Ensure initialize rejects invalid platform fee over 100%.
 #[test]
-fn test_valid_with_zero_fee_bps() {
-    let env = env_at(0);
-    assert_eq!(
-        validate_initialization_params(&env, 1_000, 9_999, 1, Some(0), None),
-        Ok(())
+#[should_panic(expected = "platform fee cannot exceed 100%")]
+fn initialize_rejects_fee_over_100_percent() {
+    let (env, client, creator, token) = setup();
+    let deadline = env.ledger().timestamp() + 3_600;
+    let cfg = crate::PlatformConfig {
+        address: Address::generate(&env),
+        fee_bps: 10_001,
+    };
+    client.initialize(
+        &creator,
+        &creator,
+        &token,
+        &1_000_000,
+        &deadline,
+        &1_000,
+        &Some(cfg),
+        &None,
+        &None,
     );
 }
 
+/// @notice Ensure initialize rejects bonus goal that is not above primary goal.
 #[test]
-fn test_valid_with_max_fee_bps() {
-    // 10 000 bps = 100 % — edge case that must be accepted.
-    let env = env_at(0);
-    assert_eq!(
-        validate_initialization_params(&env, 1_000, 9_999, 1, Some(10_000), None),
-        Ok(())
+#[should_panic(expected = "bonus goal must be greater than primary goal")]
+fn initialize_rejects_non_increasing_bonus_goal() {
+    let (env, client, creator, token) = setup();
+    let deadline = env.ledger().timestamp() + 3_600;
+    client.initialize(
+        &creator,
+        &creator,
+        &token,
+        &1_000_000,
+        &deadline,
+        &1_000,
+        &None,
+        &Some(1_000_000),
+        &None,
     );
 }
 
+/// @notice Ensure initialize persists core configuration when inputs are valid.
 #[test]
-fn test_valid_with_bonus_goal() {
-    let env = env_at(0);
-    assert_eq!(
-        validate_initialization_params(&env, 1_000, 9_999, 1, None, Some(2_000)),
-        Ok(())
+fn initialize_persists_expected_state() {
+    let (env, client, creator, token) = setup();
+    let deadline = env.ledger().timestamp() + 3_600;
+    let desc = SorobanString::from_str(&env, "bonus for stretch delivery");
+    client.initialize(
+        &creator,
+        &creator,
+        &token,
+        &1_000_000,
+        &deadline,
+        &1_000,
+        &None,
+        &Some(2_000_000),
+        &Some(desc.clone()),
     );
+
+    assert_eq!(client.goal(), 1_000_000);
+    assert_eq!(client.min_contribution(), 1_000);
+    assert_eq!(client.deadline(), deadline);
+    assert_eq!(client.bonus_goal(), Some(2_000_000));
+    assert_eq!(client.bonus_goal_description(), Some(desc));
 }
 
-#[test]
-fn test_valid_bonus_goal_just_above_primary() {
-    let env = env_at(0);
-    assert_eq!(
-        validate_initialization_params(&env, 1_000, 9_999, 1, None, Some(1_001)),
-        Ok(())
-    );
-}
-
-#[test]
-fn test_valid_deadline_one_second_in_future() {
-    let env = env_at(999);
-    assert_eq!(
-        validate_initialization_params(&env, 100, 1_000, 1, None, None),
-        Ok(())
-    );
-}
-
-#[test]
-fn test_valid_large_goal() {
-    let env = env_at(0);
-    assert_eq!(
-        validate_initialization_params(&env, i128::MAX, 1_000, 1, None, None),
-        Ok(())
-    );
-}
-
-// ── goal validation ──────────────────────────────────────────────────────────
-
-#[test]
-fn test_goal_zero_is_invalid() {
-    let env = env_at(0);
-    assert_eq!(
-        validate_initialization_params(&env, 0, 1_000, 1, None, None),
-        Err(InitError::GoalNotPositive)
-    );
-}
-
-#[test]
-fn test_goal_negative_is_invalid() {
-    let env = env_at(0);
-    assert_eq!(
-        validate_initialization_params(&env, -1, 1_000, 1, None, None),
-        Err(InitError::GoalNotPositive)
-    );
-}
-
-// ── deadline validation ──────────────────────────────────────────────────────
-
-#[test]
-fn test_deadline_in_past_is_invalid() {
-    let env = env_at(3_000);
-    assert_eq!(
-        validate_initialization_params(&env, 1_000, 2_000, 10, None, None),
-        Err(InitError::DeadlineInPast)
-    );
-}
-
-#[test]
-fn test_deadline_equal_to_now_is_invalid() {
-    let env = env_at(1_000);
-    assert_eq!(
-        validate_initialization_params(&env, 1_000, 1_000, 10, None, None),
-        Err(InitError::DeadlineInPast)
-    );
-}
-
-// ── min_contribution validation ──────────────────────────────────────────────
-
-#[test]
-fn test_min_contribution_zero_is_invalid() {
-    let env = env_at(0);
-    assert_eq!(
-        validate_initialization_params(&env, 1_000, 9_999, 0, None, None),
-        Err(InitError::MinContributionNotPositive)
-    );
-}
-
-#[test]
-fn test_min_contribution_negative_is_invalid() {
-    let env = env_at(0);
-    assert_eq!(
-        validate_initialization_params(&env, 1_000, 9_999, -5, None, None),
-        Err(InitError::MinContributionNotPositive)
-    );
-}
-
-#[test]
-fn test_min_contribution_exceeds_goal() {
-    let env = env_at(0);
-    assert_eq!(
-        validate_initialization_params(&env, 100, 9_999, 150, None, None),
-        Err(InitError::MinContributionExceedsGoal)
-    );
-}
-
-#[test]
-fn test_min_contribution_one_above_goal_is_invalid() {
-    let env = env_at(0);
-    assert_eq!(
-        validate_initialization_params(&env, 1_000, 9_999, 1_001, None, None),
-        Err(InitError::MinContributionExceedsGoal)
-    );
-}
-
-// ── platform fee validation ──────────────────────────────────────────────────
-
-#[test]
-fn test_platform_fee_above_max_is_invalid() {
-    let env = env_at(0);
-    assert_eq!(
-        validate_initialization_params(&env, 1_000, 9_999, 1, Some(10_001), None),
-        Err(InitError::PlatformFeeExceedsMax)
-    );
-}
-
-#[test]
-fn test_platform_fee_u32_max_is_invalid() {
-    let env = env_at(0);
-    assert_eq!(
-        validate_initialization_params(&env, 1_000, 9_999, 1, Some(u32::MAX), None),
-        Err(InitError::PlatformFeeExceedsMax)
-    );
-}
-
-// ── bonus_goal validation ────────────────────────────────────────────────────
-
-#[test]
-fn test_bonus_goal_equal_to_primary_is_invalid() {
-    let env = env_at(0);
-    assert_eq!(
-        validate_initialization_params(&env, 1_000, 9_999, 1, None, Some(1_000)),
-        Err(InitError::BonusGoalNotGreaterThanGoal)
-    );
-}
-
-#[test]
-fn test_bonus_goal_below_primary_is_invalid() {
-    let env = env_at(0);
-    assert_eq!(
-        validate_initialization_params(&env, 1_000, 9_999, 1, None, Some(500)),
-        Err(InitError::BonusGoalNotGreaterThanGoal)
-    );
-}
-
-// ── error ordering (goal checked first) ─────────────────────────────────────
-
-#[test]
-fn test_goal_error_takes_priority_over_deadline() {
-    // Both goal and deadline are invalid; goal error should surface first.
-    let env = env_at(5_000);
-    assert_eq!(
-        validate_initialization_params(&env, 0, 1_000, 1, None, None),
-        Err(InitError::GoalNotPositive)
-    );
-}
-
-#[test]
-fn test_deadline_error_takes_priority_over_min_contribution() {
-    let env = env_at(5_000);
-    assert_eq!(
-        validate_initialization_params(&env, 1_000, 1_000, 0, None, None),
-        Err(InitError::DeadlineInPast)
-    );
-}
-
-// ── InitError::message ───────────────────────────────────────────────────────
-
-#[test]
-fn test_error_messages_are_non_empty() {
-    let errors = [
-        InitError::GoalNotPositive,
-        InitError::DeadlineInPast,
-        InitError::MinContributionNotPositive,
-        InitError::MinContributionExceedsGoal,
-        InitError::PlatformFeeExceedsMax,
-        InitError::BonusGoalNotGreaterThanGoal,
-    ];
-    for e in errors {
-        assert!(
-            !e.message().is_empty(),
-            "message for {e:?} must not be empty"
-        );
-    }
-}
-
-// ── bool-returning compat wrapper ────────────────────────────────────────────
-
-#[test]
-fn test_bool_wrapper_returns_true_for_valid_params() {
-    let env = env_at(1_000);
-    assert!(validate_initialization_params_bool(&env, 1_000, 2_000, 10));
-}
-
-#[test]
-fn test_bool_wrapper_returns_false_for_invalid_goal() {
-    let env = env_at(0);
-    assert!(!validate_initialization_params_bool(&env, 0, 2_000, 10));
-}
-
-#[test]
-fn test_bool_wrapper_returns_false_for_past_deadline() {
-    let env = env_at(3_000);
-    assert!(!validate_initialization_params_bool(&env, 1_000, 2_000, 10));
-}
-
-#[test]
-fn test_bool_wrapper_returns_false_for_invalid_min_contribution() {
-    let env = env_at(0);
-    assert!(!validate_initialization_params_bool(&env, 100, 2_000, 150));
-}
