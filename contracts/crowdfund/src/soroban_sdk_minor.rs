@@ -3,7 +3,7 @@
 //! This module centralizes low-level helpers used when reviewing/operating a
 //! minor Soroban SDK bump so behavior is explicit, testable, and audit-friendly.
 
-#![allow(dead_code)]
+#[allow(dead_code)]
 
 use soroban_sdk::{contracttype, Address, BytesN, Env, String, Symbol};
 

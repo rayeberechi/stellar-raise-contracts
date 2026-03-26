@@ -27,7 +27,7 @@
 //! 4. **Compliance enforcement** — CI/CD rules are automatically enforced
 //! 5. **Audit trail** — All changes are tracked and verifiable
 
-#![allow(dead_code, missing_docs)]
+#[allow(dead_code, missing_docs)]
 
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, Vec, Map, String};
 

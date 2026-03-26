@@ -118,7 +118,7 @@
 //! - The `InitializedEvent` payload is bounded: it contains only scalar
 //!   values and optional scalars, never unbounded collections.
 
-#![allow(dead_code)]
+#[allow(dead_code)]
 
 use soroban_sdk::{Address, Env, String, Vec};
 

@@ -21,6 +21,11 @@ pub const MIN_CAMPAIGN_GOAL: u64 = 100;
 /// Ensures goal meets minimum threshold and creator is authenticated.
 pub fn create_campaign(env: Env, creator: Address, goal: u64) {
     creator.require_auth();
+    if goal < MIN_CAMPAIGN_GOAL {
+        panic!("Goal too low");
+    }
+    env.events().publish(("campaign", "created"), (creator, goal));
+}
 
 // ── Validation helpers ───────────────────────────────────────────────────────
 
@@ -101,22 +106,15 @@ pub fn validate_goal_amount(
 }
 
 /// Validates that `min_contribution` meets the minimum floor.
+pub const MIN_CONTRIBUTION_AMOUNT: i128 = 1;
+pub const MIN_GOAL_AMOUNT: i128 = 100;
+
 #[inline]
 pub fn validate_min_contribution(min_contribution: i128) -> Result<(), &'static str> {
     if min_contribution < MIN_CONTRIBUTION_AMOUNT {
         return Err("min_contribution must be at least MIN_CONTRIBUTION_AMOUNT");
     }
-
-    if goal == 0 {
-        panic!("Campaign goal must be non-zero");
-    }
-
-    // Example storage logic (placeholder)
-    // env.storage().instance().set(&DataKey::Creator, &creator);
-    // env.storage().instance().set(&DataKey::Goal, &goal);
-    
-    // Emit event as requested
-    env.events().publish(("campaign", "created"), (creator, goal));
+    Ok(())
 }
 
 /// Validates if a goal meets the minimum threshold.

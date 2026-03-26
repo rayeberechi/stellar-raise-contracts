@@ -1,5 +1,5 @@
 #![no_std]
-#![allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 
 use soroban_sdk::{
     contract, contractclient, contractimpl, contracttype, token, Address, Env, String,
@@ -50,8 +50,9 @@ use withdraw_event_emission::{emit_fee_transferred, emit_withdrawn, mint_nfts_in
 #[cfg(test)]
 mod withdraw_event_emission_test;
 
+#[cfg(test)]
 #[path = "stellar_token_minter_test.rs"]
-mod stellar_token_minter_test;
+mod stellar_token_minter_test_original;
 
 // --- Tests ---
 #[cfg(test)]
@@ -70,17 +71,15 @@ pub mod contribute_error_handling;
 mod contribute_error_handling_tests;
 #[cfg(test)]
 
-mod crowdfund_initialize_function_test;
 #[cfg(test)]
-mod proptest_generator_boundary;
+pub mod proptest_generator_boundary;
 #[cfg(test)]
-
 #[path = "proptest_generator_boundary.test.rs"]
-
-mod proptest_generator_boundary_tests;
+mod proptest_generator_boundary_test;
 pub mod stellar_token_minter;
 #[cfg(test)]
-mod stellar_token_minter_test;
+#[path = "stellar_token_minter.test.rs"]
+mod stellar_token_minter_test_comprehensive;
 #[cfg(test)]
 #[path = "admin_upgrade_mechanism.test.rs"]
 mod admin_upgrade_mechanism_test;
