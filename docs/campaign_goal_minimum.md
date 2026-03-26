@@ -1,145 +1,97 @@
-# Campaign Goal Minimum Threshold Enforcement
+# Campaign Goal Minimum Threshold Enforcement — Security Refactor
 
 ## Overview
 
-The `campaign_goal_minimum` module enforces a minimum financial goal for every
-new crowdfunding campaign before it can be initialized on-chain.
+The `campaign_goal_minimum` module enforces minimum thresholds for all campaign
+creation parameters: goal amount, minimum contribution, deadline, and platform
+fee. It also provides a progress-in-basis-points helper used by the frontend
+and off-chain indexers.
 
-### Why this enforcement is necessary for scalability
-
-Without a minimum goal floor, the contract would accept campaigns with a goal
-of zero or one token unit. This creates several problems at scale:
-
-- **Ledger bloat** — Each campaign occupies at least one persistent ledger
-  entry. Dust campaigns (goal ≈ 0) provide no economic value but consume the
-  same storage as legitimate campaigns, increasing state size and validator
-  overhead across the network.
-- **Immediate drain exploit** — A zero-goal campaign is "successful" the
-  moment any contribution arrives. The creator can call `withdraw()` instantly,
-  turning the contract into a trivial donation drain with no accountability.
-- **Spam / griefing** — Without a floor, an adversary can flood the factory
-  with thousands of worthless campaigns at minimal cost, degrading indexer and
-  frontend performance for all users.
-
-Setting `MIN_GOAL_AMOUNT = 1` is deliberately permissive for test environments
-while still closing the zero-goal attack surface. Governance can raise this
-value (see [Configuration](#configuration) below).
+This refactor fixes a broken source file (duplicate functions, incomplete
+`create_campaign` stub, mismatched types) and consolidates all threshold
+validation into clean, independently testable, `#[inline]` pure functions.
 
 ---
 
-## Configuration
+## Security Rationale
 
-`MIN_GOAL_AMOUNT` is defined as a compile-time constant in
-`contracts/crowdfund/src/campaign_goal_minimum.rs`:
+| Threat | Mitigation |
+|--------|-----------|
+| Zero-goal drain | `MIN_GOAL_AMOUNT = 1` rejects goals that make a campaign immediately "successful" after any contribution |
+| Ledger spam | Non-zero minimum prevents dust campaigns that waste storage |
+| Negative goal | Single `i128` comparison rejects all values < 1 without a separate branch |
+| Fee overflow | `MAX_PLATFORM_FEE_BPS = 10_000` caps fee at 100% — above this, fee transfer would exceed total raised |
+| Deadline bypass | `MIN_DEADLINE_OFFSET = 60s` ensures campaigns run long enough for contributors to participate |
+| Progress overflow | `compute_progress_bps` uses `saturating_mul` and caps at `MAX_PROGRESS_BPS` |
+| Division by zero | `compute_progress_bps` returns 0 when `goal <= 0` |
 
-```rust
-pub const MIN_GOAL_AMOUNT: i128 = 1;
-```
+---
 
-### Updating the threshold
+## Constants
 
-Because the constant is baked into the WASM binary, changing it requires a
-contract upgrade:
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `MIN_GOAL_AMOUNT` | `1i128` | Minimum campaign goal in token units |
+| `MIN_CONTRIBUTION_AMOUNT` | `1i128` | Minimum `min_contribution` value |
+| `MAX_PLATFORM_FEE_BPS` | `10_000u32` | Maximum platform fee (100%) |
+| `PROGRESS_BPS_SCALE` | `10_000i128` | Scale factor for progress calculation |
+| `MAX_PROGRESS_BPS` | `10_000u32` | Maximum progress value (= 100%) |
+| `MIN_DEADLINE_OFFSET` | `60u64` | Minimum seconds deadline must be in the future |
 
-1. Update `MIN_GOAL_AMOUNT` in `campaign_goal_minimum.rs`.
-2. Build the new WASM:
-   ```bash
-   cargo build --release --target wasm32-unknown-unknown -p crowdfund
-   ```
-3. Upload and upgrade via the admin mechanism (see
-   `contracts/crowdfund/admin_upgrade_mechanism.md`).
+---
 
-> **Governance note** — If the project adopts on-chain governance, the minimum
-> threshold can be moved to contract storage (a `DataKey::MinGoalAmount` entry)
-> and updated via a governance proposal without a full upgrade. The
-> `validate_goal_amount` function signature already accepts `&Env` for exactly
-> this future extension.
+## API Reference
+
+### `validate_goal(goal: i128) -> Result<(), &'static str>`
+
+Off-chain / tooling helper. Returns a descriptive string error to avoid
+pulling in `ContractError`.
+
+### `validate_goal_amount(_env: &Env, goal_amount: i128) -> Result<(), ContractError>`
+
+On-chain enforcement entry point. Returns `ContractError::GoalTooLow` when
+`goal_amount < MIN_GOAL_AMOUNT`. The `_env` parameter is reserved for future
+governance-controlled thresholds stored in contract storage.
+
+### `validate_min_contribution(min_contribution: i128) -> Result<(), &'static str>`
+
+Rejects `min_contribution < MIN_CONTRIBUTION_AMOUNT`.
+
+### `validate_deadline(now: u64, deadline: u64) -> Result<(), &'static str>`
+
+Rejects deadlines less than `now + MIN_DEADLINE_OFFSET`. Uses `saturating_add`
+to prevent overflow when `now` is near `u64::MAX`.
+
+### `validate_platform_fee(fee_bps: u32) -> Result<(), &'static str>`
+
+Rejects `fee_bps > MAX_PLATFORM_FEE_BPS`.
+
+### `compute_progress_bps(total_raised: i128, goal: i128) -> u32`
+
+Returns `(total_raised * 10_000) / goal`, capped at `MAX_PROGRESS_BPS`.
+Returns 0 when `goal <= 0`.
 
 ---
 
 ## Integration
 
-### How `campaign_factory` (and `lib.rs`) should call this validation
-
-Import the typed validator at the top of the calling module:
+Call `validate_goal_amount` inside `initialize()` before any storage writes:
 
 ```rust
 use crate::campaign_goal_minimum::validate_goal_amount;
-```
 
-Call it inside `initialize()` **before** any state is written, so a rejected
-goal leaves no partial storage entries:
-
-```rust
-pub fn initialize(
-    env: Env,
-    goal: i128,
-    // … other params
-) -> Result<(), ContractError> {
-    // Reject below-threshold goals atomically — no side-effects on failure.
+pub fn initialize(env: Env, goal: i128, ...) -> Result<(), ContractError> {
     validate_goal_amount(&env, goal)?;
-
-    // … rest of initialization
+    // ... rest of initialization
     Ok(())
 }
-```
-
-The `?` operator propagates `ContractError::GoalTooLow` to the caller without
-any additional boilerplate.
-
-### Off-chain / SDK usage
-
-The string-returning `validate_goal` helper is available for off-chain tooling
-that does not want to depend on `ContractError`:
-
-```rust
-use crowdfund::campaign_goal_minimum::validate_goal;
-
-validate_goal(proposed_goal).map_err(|e| anyhow::anyhow!(e))?;
 ```
 
 ---
 
 ## Security Assumptions
 
-| Assumption | Detail |
-|---|---|
-| **Dust campaign prevention** | `MIN_GOAL_AMOUNT >= 1` ensures every campaign has a non-trivial economic commitment, preventing ledger-entry spam. |
-| **No integer overflow** | The validation is a single signed comparison (`goal_amount < MIN_GOAL_AMOUNT`). No arithmetic is performed, so overflow is impossible regardless of the input value. |
-| **Negative goal rejection** | `i128` can represent negative values. The `< MIN_GOAL_AMOUNT` check (where `MIN_GOAL_AMOUNT = 1`) rejects all negative and zero goals without a separate branch. |
-| **Atomic rejection** | `validate_goal_amount` is called before any `env.storage()` writes in `initialize()`. A rejected goal produces no ledger mutations — the transaction reverts cleanly. |
-| **Upgrade safety** | All contract storage and state persist across WASM upgrades. Raising `MIN_GOAL_AMOUNT` in a new binary does not affect already-initialized campaigns; it only applies to new `initialize()` calls. |
-
----
-
-## API Reference
-
-### `validate_goal_amount(env: &Env, goal_amount: i128) -> Result<(), ContractError>`
-
-On-chain enforcement entry point. Returns `ContractError::GoalTooLow` when
-`goal_amount < MIN_GOAL_AMOUNT`.
-
-### `validate_goal(goal: i128) -> Result<(), &'static str>`
-
-Off-chain / tooling helper. Returns a descriptive string error instead of
-`ContractError` to avoid pulling in the full contract dependency.
-
-### `MIN_GOAL_AMOUNT: i128`
-
-Compile-time minimum campaign goal (currently `1`).
-
----
-
-## Test Coverage
-
-See [`contracts/crowdfund/src/campaign_goal_minimum_test.rs`](../contracts/crowdfund/src/campaign_goal_minimum_test.rs).
-
-Key cases for `validate_goal_amount`:
-
-| Test | Input | Expected |
-|---|---|---|
-| Exact threshold | `MIN_GOAL_AMOUNT` (1) | `Ok(())` |
-| Well above threshold | `1_000_000_000` | `Ok(())` |
-| One below threshold | `MIN_GOAL_AMOUNT - 1` (0) | `Err(GoalTooLow)` |
-| Zero | `0` | `Err(GoalTooLow)` |
-| Negative | `-1`, `i128::MIN` | `Err(GoalTooLow)` |
+- **Atomic rejection** — validators are called before any `env.storage()` writes.
+- **No integer overflow** — all validators use comparisons only; `compute_progress_bps` uses `saturating_mul`.
+- **Upgrade safety** — raising `MIN_GOAL_AMOUNT` in a new binary only affects new `initialize()` calls.
+- **Governance extension** — `validate_goal_amount` accepts `&Env` for future on-chain threshold storage.

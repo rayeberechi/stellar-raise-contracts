@@ -211,6 +211,8 @@ pub enum ContractError {
     InvalidPlatformFee = 11,
     /// Returned by `initialize` when `bonus_goal <= goal`.
     InvalidBonusGoal = 12,
+    /// Returned by `initialize` when `goal < MIN_GOAL_AMOUNT`.
+    GoalTooLow = 13,
 
     /// Returned by `contribute` when `amount` is zero.
     ZeroAmount = 8,
